@@ -33,14 +33,14 @@ In the `starter` folder, you'll find 2 folders, one named `frontend` and one nam
 ### Backend
 
 1. A Continuous Integration workflow that:
-   1. Runs on `pull_requests` against the `main` branch,only when code in the frontend application changes.
+   1. Runs on `pull_requests` against the `main` branch, only when code in the backend application changes.
    2. Is able to be run on-demand (i.e. manually without needing to push code)
    3. Runs the following jobs in parallel:
-      1. Runs a linting job that fails if the code doesn't adhere to eslint rules
+      1. Runs a linting job that fails if the code doesn't adhere to flake8 rules
       2. Runs a test job that fails if the test suite doesn't pass
    4. Runs a build job only if the lint and test jobs pass and successfully builds the application
 2. A Continuous Deployment workflow that:
-   1. Runs on `push` against the `main` branch, only when code in the frontend application changes.
+   1. Runs on `push` against the `main` branch, only when code in the backend application changes.
    2. Is able to be run on-demand (i.e. manually without needing to push code)
    3. Runs the same lint/test jobs as the Continuous Integration workflow
    4. Runs a build job only when the lint and test jobs pass
@@ -59,6 +59,8 @@ Only complete these steps once you've finished your Continuous Integration pipel
 First we need to prep the AWS account with the necessary infrastructure for deploying the frontend and backend applications. As the focus of this course is building the CI/CD pipelines, we won't be requiring you to setup all of the underlying AWS and Kubernetes infrastructure. This will be done for you with the provided Terraform and helper scripts. As there are costs associated with running this infrastucture, **REMEMBER** to destroy everything before stopping work. Everything can be recreated, and the pipeline work you'll be doing is all saved in this repository.
 
 ### Create AWS infrastructure with Terraform
+
+The supplied Terraform configuration currently uses `us-east-1` for the provider, availability zones, and VPC endpoints. Use that region for this project unless you first parameterize those Terraform values.
 
 1. Export your AWS credentials from the Cloud Gateway
 2. Use the commands below to run the Terraform and type `yes` after reviewing the expected changes
@@ -86,18 +88,28 @@ terraform output
 7. On the last page, make sure to copy/paste these keys for storing in Github Secrets
 ![image](https://user-images.githubusercontent.com/57732284/221991526-ec4af661-b200-48cd-9087-6f1b3b9820b3.png)
 
-### Add Github Action user to Kubernetes
+### Configure GitHub Actions
 
-Now that the cluster and all AWS resources have been created, you'll need to add the `github-action-user` IAM user ARN to the Kubernetes configuration that will allow that user to execute `kubectl` commands against the cluster.
+The supplied Terraform configuration creates an EKS access entry and associates the `github-action-user` with the cluster admin access policy. When using this Terraform configuration, you do not need to run `setup/init.sh`.
 
-1. Run the `init.sh` helper script in the `setup` folder
+In the GitHub repository settings, add these Actions secrets:
 
-```bash
-cd setup
-./init.sh
-```
+- `AWS_ACCESS_KEY_ID`: access key for `github-action-user`.
+- `AWS_SECRET_ACCESS_KEY`: matching secret access key.
 
-2. The script will download a tool, add the IAM user ARN to the authentication configuration, indicate a `Done` status, then it'll remove the tool
+Add these Actions variables using the Terraform outputs and selected AWS region:
+
+- `AWS_REGION`
+- `EKS_CLUSTER_NAME` (`cluster_name` output)
+- `FRONTEND_ECR_REPOSITORY` (`frontend_ecr` output)
+- `BACKEND_ECR_REPOSITORY` (`backend_ecr` output)
+- `BACKEND_API_URL`: the backend's public LoadBalancer URL, without `/movies`.
+
+Deploy the backend first, then get its public service address with `kubectl get service backend`. Set `BACKEND_API_URL` to `http://<external-address>` before running the frontend deployment. Frontend CI continues to use `http://localhost:5000` as required by the development notes.
+
+Never commit AWS access keys to the repository. For an existing cluster that is not managed by this Terraform configuration, follow that cluster's EKS access procedure; `setup/init.sh` is provided for the legacy `aws-auth` mapping workflow.
+
+For the full repository, Terraform, Actions, and teardown checklist, see [PROJECT_REQUIREMENTS.md](PROJECT_REQUIREMENTS.md).
 
 ## Dependencies
 

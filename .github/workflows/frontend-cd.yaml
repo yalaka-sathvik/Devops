@@ -2,98 +2,144 @@ name: Frontend Continuous Deployment
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
       - "starter/frontend/**"
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
   lint:
+    name: Lint Frontend
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: starter/frontend
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup NodeJS
+        uses: actions/setup-node@v4
         with:
-          node-version-file: starter/frontend/.nvmrc
-          cache: npm
+          node-version: 18.x
+          cache: "npm"
           cache-dependency-path: starter/frontend/package-lock.json
-      - run: npm ci
-      - run: npm run lint
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linting
+        run: npm run lint
 
   test:
+    name: Test Frontend
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: starter/frontend
-    env:
-      CI: true
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup NodeJS
+        uses: actions/setup-node@v4
         with:
-          node-version-file: starter/frontend/.nvmrc
-          cache: npm
+          node-version: 18.x
+          cache: "npm"
           cache-dependency-path: starter/frontend/package-lock.json
-      - run: npm ci
-      - run: npm run test
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        env:
+          CI: "true"
+        run: npm test
 
   build:
+    name: Build and Push Frontend Image
     runs-on: ubuntu-latest
     needs: [lint, test]
     outputs:
       image_uri: ${{ steps.image.outputs.image_uri }}
     env:
-      REACT_APP_MOVIE_API_URL: ${{ vars.BACKEND_API_URL }}
-      ECR_REPOSITORY: ${{ vars.FRONTEND_ECR_REPOSITORY }}
+      AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || secrets.AWS_DEFAULT_REGION || 'us-east-1' }}
+      REACT_APP_MOVIE_API_URL: ${{ vars.BACKEND_API_URL || secrets.REACT_APP_MOVIE_API_URL || 'http://localhost:5000' }}
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Require a reachable backend URL
-        run: |
-          if [[ -z "$REACT_APP_MOVIE_API_URL" ]]; then
-            echo "::error::Set the BACKEND_API_URL repository variable to the backend LoadBalancer URL."
-            exit 1
-          fi
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION }}
-      - uses: aws-actions/amazon-ecr-login@v2
-      - name: Set image URI
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set Image URI
         id: image
-        run: echo "image_uri=${ECR_REPOSITORY}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
-      - name: Build and push image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          EXPLICIT_REPO: ${{ vars.FRONTEND_ECR_REPOSITORY }}
         run: |
+          if [ -n "$EXPLICIT_REPO" ]; then
+            echo "image_uri=${EXPLICIT_REPO}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+            echo "repo_url=${EXPLICIT_REPO}" >> "$GITHUB_OUTPUT"
+          else
+            echo "image_uri=${ECR_REGISTRY}/frontend:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+            echo "repo_url=${ECR_REGISTRY}/frontend" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and Push Docker Image
+        run: |
+          cd starter/frontend
           docker build \
-            --build-arg "REACT_APP_MOVIE_API_URL=$REACT_APP_MOVIE_API_URL" \
+            --build-arg REACT_APP_MOVIE_API_URL="${REACT_APP_MOVIE_API_URL}" \
             --tag "${{ steps.image.outputs.image_uri }}" \
-            ./starter/frontend
+            --tag "${{ steps.image.outputs.repo_url }}:latest" .
           docker push "${{ steps.image.outputs.image_uri }}"
+          docker push "${{ steps.image.outputs.repo_url }}:latest"
 
   deploy:
+    name: Deploy Frontend to EKS
     runs-on: ubuntu-latest
     needs: build
     env:
+      AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || secrets.AWS_DEFAULT_REGION || 'us-east-1' }}
+      CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME || 'cluster' }}
       IMAGE_URI: ${{ needs.build.outputs.image_uri }}
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION }}
-      - name: Configure EKS access
-        run: aws eks update-kubeconfig --name "${{ vars.EKS_CLUSTER_NAME }}" --region "${{ vars.AWS_REGION }}"
-      - uses: azure/setup-kubectl@v4
-      - uses: imranismail/setup-kustomize@v2
-      - name: Deploy image
-        working-directory: starter/frontend/k8s
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+
+      - name: Update Kubeconfig
         run: |
-          kustomize edit set image "frontend=$IMAGE_URI"
+          aws eks update-kubeconfig --name "${{ env.CLUSTER_NAME }}" --region "${{ env.AWS_DEFAULT_REGION }}"
+
+      - name: Setup Kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Setup Kustomize
+        uses: imranismail/setup-kustomize@v2
+
+      - name: Deploy to Kubernetes Cluster
+        run: |
+          cd starter/frontend/k8s
+          kustomize edit set image frontend="${{ env.IMAGE_URI }}"
           kustomize build | kubectl apply -f -
